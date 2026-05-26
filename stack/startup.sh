@@ -13,9 +13,9 @@ if [ "${CLEAR_COMPRESSOR_CACHE:-off}" = "on" ]; then
     /venv/bin/python clear-compressor-cache.py
 fi
 
-# Compress files if enabled
+# Compress files if enabled (v9 uses .html templates + a dedicated settings module)
 if [ "${MANAGEPY_COMPRESS:-off}" = "on" ]; then
-    /venv/bin/python manage.py compress --extension=".haml" --force -v0
+    /venv/bin/python manage.py compress --extension=".html" --settings=temba.settings_compress --force -v0
 fi
 
 # Initialize the database if enabled
