@@ -32,8 +32,8 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates tini; \
     rm -rf /var/lib/apt/lists/*; \
-    addgroup --system app; \
-    adduser --system --ingroup app --home /home/app app; \
+    groupadd -g 1000 app; \
+    useradd -u 1000 -g app -m -d /home/app -s /usr/sbin/nologin app; \
     mkdir -p /var/spool/${BINARY} _storage; \
     chown -R app:app /var/spool/${BINARY} _storage /home/app
 
