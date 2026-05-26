@@ -1,31 +1,58 @@
-RapidPro Docker
-===============
+RapidPro Docker (v9)
+====================
 
-[![Build Status](https://travis-ci.org/praekeltfoundation/rapidpro-docker.svg?branch=master)](https://travis-ci.org/praekeltfoundation/rapidpro-docker)
-[![Docker Version](https://images.microbadger.com/badges/version/praekeltfoundation/rapidpro.svg)](https://hub.docker.com/r/praekeltfoundation/rapidpro/tags/ "Get the latest version from Docker Hub")
+Builds multi-arch (amd64 + arm64) container images for the open-source RapidPro
+v9 stack and publishes them to `docker.io/morrismukiri/*`:
 
-This repository's sole purpose is to build docker images versioned off of
-git tags published in rapidpro/rapidpro and upload them to Docker Hub.
+| Image | Upstream | Tag |
+|-------|----------|-----|
+| `morrismukiri/rapidpro`    | rapidpro/rapidpro      | `v9.0.0`, `v9` |
+| `morrismukiri/mailroom`    | nyaruka/mailroom       | `v9.3.72`, `v9` |
+| `morrismukiri/courier`     | nyaruka/courier        | `v9.3.44`, `v9` |
+| `morrismukiri/rp-indexer`  | nyaruka/rp-indexer     | `v9.3.4`, `v9` |
+| `morrismukiri/rp-archiver` | nyaruka/rp-archiver    | `v9.3.9`, `v9` |
 
-The idea is:
+The app image runs **gunicorn** as a **non-root** user with static assets baked
+at build time (WhiteNoise). The four Go services are built from a single
+parameterized `go-services/Dockerfile` that downloads the prebuilt release
+binary for the target architecture.
 
-  1. Set up Travis Cron job to run every 24 hours
-  3. The Travis build script should download the latest rapidpro/rapidpro
-     tagged release matching `^v[0-9\.]$`
-  4. Build the docker image and tag with the latest git tag.
-  5. Push the docker image to Docker hub using credentials stored in
-     Travis' secrets vault.
+Building
+--------
 
-Running RapidPro in Docker
---------------------------
+The local engine is **podman** (set `ENGINE=docker` for Docker). See the
+`Makefile`:
 
-To run the latest cutting edge version:
+```sh
+make images            # build all five images (native arch)
+make build-app         # just the RapidPro app image
+make publish-app PLATFORMS=linux/amd64,linux/arm64   # multi-arch manifest + push
+```
 
-> $ docker run --publish 8000:8000 rapidpro/rapidpro:master
+CI builds and pushes multi-arch images via `docker-bake.hcl` (buildx).
 
-To run a specific version:
+Local development
+-----------------
 
-> $ docker run --publish 8000:8000 rapidpro/rapidpro:v2.0.478
+`docker-compose.yml` runs the full stack locally (app + split celery + the Go
+services + PostGIS/Redis/Elasticsearch) for smoke testing the images:
+
+```sh
+docker compose up    # or: podman compose up
+```
+
+Kubernetes
+----------
+
+Deploy with the Helm chart at `morrismukiri/helm-chart-rapidpro` (celery worker
+pools with queue isolation, a singleton beat, a migrate hook Job, and hand-rolled
+dev/staging dependencies). Production points the deps at external URLs; dev/kind
+uses the bundled deps + MinIO (`values-local.yaml`).
+
+Running a single image directly
+-------------------------------
+
+> $ docker run --publish 8000:8000 morrismukiri/rapidpro:v9
 
 Environment variables
 ---------------------

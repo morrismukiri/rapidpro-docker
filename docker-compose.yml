@@ -1,122 +1,107 @@
 #
-# NOTE: This docker-compose is not used for building the rapidpro docker
-#       releases, it is a compose file for local development purposes.
+# Local-development compose for the RapidPro v9 images. NOT used to build or
+# publish releases (that is the Makefile / docker-bake.hcl / GitHub Actions).
+# Mirrors the chart topology: gunicorn app, split celery (worker + beat), the
+# Go services, and PostGIS/Redis/Elasticsearch deps.
 #
+x-rapidpro-env: &rapidpro-env
+  DOMAIN_NAME: localhost
+  ALLOWED_HOSTS: localhost
+  TEMBA_HOST: localhost
+  DJANGO_DEBUG: "off"
+  DATABASE_URL: postgresql://postgres:postgres@postgresql:5432/rapidpro
+  REDIS_URL: redis://redis:6379/15
+  SECRET_KEY: super-secret-key
+  MAILROOM_URL: http://mailroom:8090
+  MAILROOM_AUTH_TOKEN: super-secret-token
+  ELASTICSEARCH_URL: http://elasticsearch:9200
 
-version: '2'
 services:
   nginx:
     image: nginx:latest
-    depends_on:
-      - rapidpro
-      - courier
-    links:
-      - rapidpro
-      - courier
+    depends_on: [rapidpro, courier, mailroom]
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf
     ports:
-      - 80:80
+      - "80:80"
+
   rapidpro:
-    image: praekeltfoundation/rapidpro:latest
-    depends_on:
-      - redis
-      - postgresql
-      - courier
-      - mailroom
-      - elasticsearch
-    expose:
-      - '8000'
+    image: docker.io/morrismukiri/rapidpro:v9
+    depends_on: [redis, postgresql, elasticsearch]
+    expose: ["8000"]
     environment:
-      - DOMAIN_NAME=localhost
-      - ALLOWED_HOSTS=localhost
-      - TEMBA_HOST=localhost
-      - DJANGO_DEBUG=off
-      - DATABASE_URL=postgresql://postgres:postgres@postgresql/rapidpro
-      - REDIS_URL=redis://redis:6379/0
-      - SECRET_KEY=super-secret-key
-      - MANAGEPY_COLLECTSTATIC=on
-      - MANAGEPY_COMPRESS=on
-      - MANAGEPY_INIT_DB=on
-      - MANAGEPY_MIGRATE=on
-      - MAILROOM_URL=http://mailroom:8090
-      - MAILROOM_AUTH_TOKEN=Gqcqvi2PGkoZMpQi
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      <<: *rapidpro-env
+      # static is baked at build; run migrations once on first boot.
+      MANAGEPY_COLLECTSTATIC: "off"
+      MANAGEPY_COMPRESS: "off"
+      MANAGEPY_MIGRATE: "on"
+      GUNICORN_WORKERS: "2"
+
   celery:
-    image: praekeltfoundation/rapidpro:latest
-    depends_on:
-      - rapidpro
-      - mailroom
-      - elasticsearch
-    links:
-      - redis
-      - postgresql
-      - mailroom
-      - elasticsearch
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@postgresql/rapidpro
-      - REDIS_URL=redis://redis:6379/0
-      - SECRET_KEY=super-secret-key
-      - MAILROOM_URL=http://mailroom:8090
-      - MAILROOM_AUTH_TOKEN=Gqcqvi2PGkoZMpQi
-      - ELASTICSEARCH_URL=http://elasticsearch:9200
-    command: ["/venv/bin/celery", "--beat", "--app=temba", "worker", "--loglevel=INFO", "--queues=celery"]
+    image: docker.io/morrismukiri/rapidpro:v9
+    depends_on: [rapidpro, redis, postgresql]
+    environment: { <<: *rapidpro-env }
+    # one worker consuming both queues for local dev (the chart splits them).
+    command: ["celery", "-A", "temba", "worker", "-Q", "celery,exports", "--loglevel=INFO", "--concurrency=2"]
+
+  celery-beat:
+    image: docker.io/morrismukiri/rapidpro:v9
+    depends_on: [redis, postgresql]
+    environment: { <<: *rapidpro-env }
+    command: ["celery", "-A", "temba", "beat", "--loglevel=info", "--schedule", "/tmp/celerybeat-schedule"]
+
   redis:
-    image: redis:alpine
+    image: redis:7.2-alpine
+
   postgresql:
-    image: mdillon/postgis:9.6
+    image: postgis/postgis:15-3.3
     environment:
-      - POSTGRES_DB=rapidpro
-  courier:
-    image: praekeltfoundation/courier:latest
-    depends_on:
-      - postgresql
-      - redis
-    expose:
-      - '8080'
-    links:
-      - redis
-      - postgresql
-    environment:
-      - COURIER_DB=postgres://postgres:postgres@postgresql/rapidpro
-      - COURIER_REDIS=redis://redis:6379/0
-      - COURIER_DOMAIN=localhost
-      - COURIER_SPOOL_DIR=/home/courier/spool/persisted/
-  indexer:
-    image: praekeltfoundation/rp-indexer:latest
-    depends_on:
-      - postgresql
-      - elasticsearch
-    links:
-      - postgresql
-      - elasticsearch
-    environment:
-      - INDEXER_DB=postgresql://postgres:postgres@postgresql/rapidpro?sslmode=disable
-      - INDEXER_ELASTIC_URL=http://elasticsearch:9200
-  elasticsearch:
-    image: elasticsearch:6.4.0
-    environment:
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    ports:
-      - 9200:9200
+      POSTGRES_DB: rapidpro
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     volumes:
-      - 'es_data:/usr/share/elasticsearch/data'
-  mailroom:
-    image: praekeltfoundation/mailroom:2.0.9
-    depends_on:
-      - postgresql
-      - redis
-    links:
-      - postgresql
-      - redis
+      - pg_data:/var/lib/postgresql/data
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
     environment:
-      - MAILROOM_DOMAIN=mailroom
-      - MAILROOM_AUTH_TOKEN=Gqcqvi2PGkoZMpQi
-      - MAILROOM_ATTACHMENT_DOMAIN=mailroom
-      - MAILROOM_DB=postgres://postgres:postgres@postgresql/rapidpro?sslmode=disable
-      - MAILROOM_REDIS=redis://redis:6379/0
-      - MAILROOM_LOG_LEVEL=debug
-    command: ["mailroom", "--address", "0.0.0.0"]
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    expose: ["9200"]
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  courier:
+    image: docker.io/morrismukiri/courier:v9
+    depends_on: [postgresql, redis]
+    expose: ["8080"]
+    environment:
+      COURIER_DB: postgres://postgres:postgres@postgresql:5432/rapidpro?sslmode=disable
+      COURIER_REDIS: redis://redis:6379/12
+      COURIER_DOMAIN: localhost
+      COURIER_SPOOL_DIR: /var/spool/courier
+
+  mailroom:
+    image: docker.io/morrismukiri/mailroom:v9
+    depends_on: [postgresql, redis, elasticsearch]
+    expose: ["8090"]
+    environment:
+      MAILROOM_ADDRESS: "0.0.0.0"
+      MAILROOM_DOMAIN: localhost
+      MAILROOM_AUTH_TOKEN: super-secret-token
+      MAILROOM_DB: postgres://postgres:postgres@postgresql:5432/rapidpro?sslmode=disable
+      MAILROOM_REDIS: redis://redis:6379/11
+      MAILROOM_ELASTIC: http://elasticsearch:9200
+      MAILROOM_LOG_LEVEL: info
+
+  indexer:
+    image: docker.io/morrismukiri/rp-indexer:v9
+    depends_on: [postgresql, elasticsearch]
+    environment:
+      INDEXER_DB: postgresql://postgres:postgres@postgresql:5432/rapidpro?sslmode=disable
+      INDEXER_ELASTIC_URL: http://elasticsearch:9200
 
 volumes:
   es_data:
+  pg_data:
