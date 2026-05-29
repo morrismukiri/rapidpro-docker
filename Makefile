@@ -61,6 +61,24 @@ publish-app: ## Build+push multi-arch app manifest (set PLATFORMS=linux/amd64,li
 	  --build-arg NODE_MAJOR=$(NODE_MAJOR) -f Dockerfile .
 	$(ENGINE) manifest push --all $(REGISTRY)/rapidpro:$(APP_TAG) docker://$(REGISTRY)/rapidpro:$(APP_TAG)
 
+# $1=image $2=binary $3=repo $4=version $5=port  (multi-arch manifest publish)
+define publish_go
+	-$(ENGINE) manifest rm $(REGISTRY)/$(1):v$(4) 2>/dev/null
+	-$(ENGINE) rmi -f $(REGISTRY)/$(1):v$(4) 2>/dev/null
+	$(ENGINE) build --platform $(PLATFORMS) --manifest $(REGISTRY)/$(1):v$(4) \
+	  --build-arg BINARY=$(2) --build-arg REPO=$(3) --build-arg VERSION=$(4) --build-arg PORT=$(5) \
+	  -f go-services/Dockerfile go-services
+	$(ENGINE) manifest push --all $(REGISTRY)/$(1):v$(4) docker://$(REGISTRY)/$(1):v$(4)
+endef
+
+publish-go: ## Build+push multi-arch manifests for the 4 Go services
+	$(call publish_go,mailroom,mailroom,nyaruka/mailroom,$(MAILROOM_VERSION),8090)
+	$(call publish_go,courier,courier,nyaruka/courier,$(COURIER_VERSION),8080)
+	$(call publish_go,rp-indexer,rp-indexer,nyaruka/rp-indexer,$(INDEXER_VERSION),8080)
+	$(call publish_go,rp-archiver,rp-archiver,nyaruka/rp-archiver,$(ARCHIVER_VERSION),8080)
+
+push: publish-app publish-go ## Build+push multi-arch manifests for all five images
+
 clean: ## Remove the local kind cluster
 	kind delete cluster --name rapidpro-verify 2>/dev/null || true
 

@@ -110,12 +110,16 @@ Environment variables
   Defaults to `INFO`
 
 *AWS_STORAGE_BUCKET_NAME*
-  If set RapidPro will use S3 for static file storage. If not it will
-  default to using whitenoise.
+  If set, RapidPro stores uploaded **media and exports** on S3. Static assets
+  are baked into the image at build time and served by WhiteNoise regardless of
+  this setting.
 
-*AWS_BUCKET_DOMAIN*
-  The domain to use for serving statics from, defaults to
-  ``AWS_STORAGE_BUCKET_NAME`` + '.s3.amazonaws.com'
+*AWS_S3_REGION_NAME*
+  Region for the S3 bucket (used to build a region-correct endpoint).
+
+*AWS_S3_ENDPOINT_URL*
+  Optional S3 endpoint override (e.g. for MinIO). Defaults to the AWS endpoint
+  for ``AWS_S3_REGION_NAME``.
 
 *CDN_DOMAIN_NAME*
   Defaults to `''`
@@ -129,17 +133,23 @@ Environment variables
   This environment variable is available at run time but is only used for
   namespacing the django compressor manifest.
 
-*UWSGI_WSGI_FILE*
-  Defaults to `temba/wsgi.py`
+The app runs **gunicorn** (config at `/rapidpro/gunicorn.conf.py`), tuned via env:
 
-*UWSGI_MASTER*
-  Defaults to `1`
+*GUNICORN_WORKERS*
+  Worker processes. Defaults to `4`.
 
-*UWSGI_WORKERS*
-  Defaults to `8`
+*GUNICORN_THREADS*
+  Threads per worker. Defaults to `4`.
 
-*UWSGI_HARAKIRI*
-  Defaults to `20`
+*GUNICORN_TIMEOUT*
+  Worker timeout in seconds. Defaults to `30`.
+
+*GUNICORN_MAX_REQUESTS* / *GUNICORN_MAX_REQUESTS_JITTER*
+  Recycle a worker after this many requests (plus jitter) to bound memory.
+  Default `1000` / `100`.
+
+*PORT*
+  Port gunicorn binds to. Defaults to `8000`.
 
 *MAGE_AUTH_TOKEN*
   The Auth token for Mage

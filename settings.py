@@ -7,7 +7,6 @@
 import ctypes.util
 import json
 import os
-import platform
 
 import dj_database_url
 

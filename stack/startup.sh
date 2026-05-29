@@ -20,14 +20,20 @@ fi
 
 # Initialize the database if enabled
 if [ "${MANAGEPY_INIT_DB:-off}" = "on" ]; then
+    # Use an explicit pgpass at a writable, deterministic path (do not rely on
+    # $HOME for the non-root user) and guarantee cleanup even if dbshell fails
+    # (set -e would otherwise skip a trailing rm and leave the password on disk).
+    PGPASSFILE=/rapidpro/.pgpass
+    export PGPASSFILE
+    trap 'rm -f "$PGPASSFILE"' EXIT INT TERM
     # Temporarily stop echoing commands to avoid leaking sensitive information
     set +x
-    # Configure .pgpass for passwordless PostgreSQL operations
-    echo "*:*:*:*:$(echo "$DATABASE_URL" | cut -d'@' -f1 | cut -d':' -f3)" > $HOME/.pgpass
-    chmod 0600 $HOME/.pgpass
+    echo "*:*:*:*:$(echo "$DATABASE_URL" | cut -d'@' -f1 | cut -d':' -f3)" > "$PGPASSFILE"
+    chmod 0600 "$PGPASSFILE"
     set -x
     /venv/bin/python manage.py dbshell < init_db.sql
-    rm $HOME/.pgpass
+    rm -f "$PGPASSFILE"
+    trap - EXIT INT TERM
 fi
 
 # Run database migrations if enabled
