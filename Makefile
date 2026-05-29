@@ -9,10 +9,11 @@ PLATFORMS         ?= linux/arm64                 # publish sets linux/amd64,linu
 RAPIDPRO_VERSION  ?= v9.0.0
 RAPIDPRO_REPO     ?= rapidpro/rapidpro
 NODE_MAJOR        ?= 20
-MAILROOM_VERSION  ?= 9.3.72
-COURIER_VERSION   ?= 9.3.44
-INDEXER_VERSION   ?= 9.3.4
-ARCHIVER_VERSION  ?= 9.3.9
+# Go components must match the app's DB schema (v9.0.0 stable), NOT the 9.3 dev line.
+MAILROOM_VERSION  ?= 9.0.1
+COURIER_VERSION   ?= 9.0.1
+INDEXER_VERSION   ?= 9.0.0
+ARCHIVER_VERSION  ?= 9.0.0
 
 APP_TAG           ?= $(RAPIDPRO_VERSION)
 MAJOR_TAG         ?= v9
@@ -53,7 +54,8 @@ build-archiver: ## Build rp-archiver
 
 # --- multi-arch publish (podman manifest) -------------------------------------
 publish-app: ## Build+push multi-arch app manifest (set PLATFORMS=linux/amd64,linux/arm64)
-	$(ENGINE) manifest create $(REGISTRY)/rapidpro:$(APP_TAG) 2>/dev/null || true
+	-$(ENGINE) manifest rm $(REGISTRY)/rapidpro:$(APP_TAG) 2>/dev/null
+	-$(ENGINE) rmi -f $(REGISTRY)/rapidpro:$(APP_TAG) 2>/dev/null
 	$(ENGINE) build --platform $(PLATFORMS) --manifest $(REGISTRY)/rapidpro:$(APP_TAG) \
 	  --build-arg RAPIDPRO_VERSION=$(RAPIDPRO_VERSION) --build-arg RAPIDPRO_REPO=$(RAPIDPRO_REPO) \
 	  --build-arg NODE_MAJOR=$(NODE_MAJOR) -f Dockerfile .

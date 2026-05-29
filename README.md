@@ -7,10 +7,14 @@ v9 stack and publishes them to `docker.io/morrismukiri/*`:
 | Image | Upstream | Tag |
 |-------|----------|-----|
 | `morrismukiri/rapidpro`    | rapidpro/rapidpro      | `v9.0.0`, `v9` |
-| `morrismukiri/mailroom`    | nyaruka/mailroom       | `v9.3.72`, `v9` |
-| `morrismukiri/courier`     | nyaruka/courier        | `v9.3.44`, `v9` |
-| `morrismukiri/rp-indexer`  | nyaruka/rp-indexer     | `v9.3.4`, `v9` |
-| `morrismukiri/rp-archiver` | nyaruka/rp-archiver    | `v9.3.9`, `v9` |
+| `morrismukiri/mailroom`    | nyaruka/mailroom       | `v9.0.1`, `v9` |
+| `morrismukiri/courier`     | nyaruka/courier        | `v9.0.1`, `v9` |
+| `morrismukiri/rp-indexer`  | nyaruka/rp-indexer     | `v9.0.0`, `v9` |
+| `morrismukiri/rp-archiver` | nyaruka/rp-archiver    | `v9.0.0`, `v9` |
+
+> The Go services are pinned to the **9.0.x** line to match the v9.0.0 app's
+> database schema. The later 9.1-9.3 tags expect schema from RapidPro's unreleased
+> dev series and will error against a v9.0.0 database.
 
 The app image runs **gunicorn** as a **non-root** user with static assets baked
 at build time (WhiteNoise). The four Go services are built from a single

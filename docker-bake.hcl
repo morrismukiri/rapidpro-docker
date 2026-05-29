@@ -7,10 +7,11 @@ variable "PLATFORMS" { default = ["linux/amd64", "linux/arm64"] }
 variable "RAPIDPRO_VERSION" { default = "v9.0.0" }
 variable "RAPIDPRO_REPO" { default = "rapidpro/rapidpro" }
 variable "NODE_MAJOR" { default = "20" }
-variable "MAILROOM_VERSION" { default = "9.3.72" }
-variable "COURIER_VERSION" { default = "9.3.44" }
-variable "INDEXER_VERSION" { default = "9.3.4" }
-variable "ARCHIVER_VERSION" { default = "9.3.9" }
+# Match the app's DB schema (v9.0.0 stable), not the 9.3 dev line.
+variable "MAILROOM_VERSION" { default = "9.0.1" }
+variable "COURIER_VERSION" { default = "9.0.1" }
+variable "INDEXER_VERSION" { default = "9.0.0" }
+variable "ARCHIVER_VERSION" { default = "9.0.0" }
 
 group "default" {
   targets = ["app", "mailroom", "courier", "rp-indexer", "rp-archiver"]
