@@ -1,31 +1,62 @@
-RapidPro Docker
-===============
+RapidPro Docker (v9)
+====================
 
-[![Build Status](https://travis-ci.org/praekeltfoundation/rapidpro-docker.svg?branch=master)](https://travis-ci.org/praekeltfoundation/rapidpro-docker)
-[![Docker Version](https://images.microbadger.com/badges/version/praekeltfoundation/rapidpro.svg)](https://hub.docker.com/r/praekeltfoundation/rapidpro/tags/ "Get the latest version from Docker Hub")
+Builds multi-arch (amd64 + arm64) container images for the open-source RapidPro
+v9 stack and publishes them to `docker.io/morrismukiri/*`:
 
-This repository's sole purpose is to build docker images versioned off of
-git tags published in rapidpro/rapidpro and upload them to Docker Hub.
+| Image | Upstream | Tag |
+|-------|----------|-----|
+| `morrismukiri/rapidpro`    | rapidpro/rapidpro      | `v9.0.0`, `v9` |
+| `morrismukiri/mailroom`    | nyaruka/mailroom       | `v9.0.1`, `v9` |
+| `morrismukiri/courier`     | nyaruka/courier        | `v9.0.1`, `v9` |
+| `morrismukiri/rp-indexer`  | nyaruka/rp-indexer     | `v9.0.0`, `v9` |
+| `morrismukiri/rp-archiver` | nyaruka/rp-archiver    | `v9.0.0`, `v9` |
 
-The idea is:
+> The Go services are pinned to the **9.0.x** line to match the v9.0.0 app's
+> database schema. The later 9.1-9.3 tags expect schema from RapidPro's unreleased
+> dev series and will error against a v9.0.0 database.
 
-  1. Set up Travis Cron job to run every 24 hours
-  3. The Travis build script should download the latest rapidpro/rapidpro
-     tagged release matching `^v[0-9\.]$`
-  4. Build the docker image and tag with the latest git tag.
-  5. Push the docker image to Docker hub using credentials stored in
-     Travis' secrets vault.
+The app image runs **gunicorn** as a **non-root** user with static assets baked
+at build time (WhiteNoise). The four Go services are built from a single
+parameterized `go-services/Dockerfile` that downloads the prebuilt release
+binary for the target architecture.
 
-Running RapidPro in Docker
---------------------------
+Building
+--------
 
-To run the latest cutting edge version:
+The local engine is **podman** (set `ENGINE=docker` for Docker). See the
+`Makefile`:
 
-> $ docker run --publish 8000:8000 rapidpro/rapidpro:master
+```sh
+make images            # build all five images (native arch)
+make build-app         # just the RapidPro app image
+make publish-app PLATFORMS=linux/amd64,linux/arm64   # multi-arch manifest + push
+```
 
-To run a specific version:
+CI builds and pushes multi-arch images via `docker-bake.hcl` (buildx).
 
-> $ docker run --publish 8000:8000 rapidpro/rapidpro:v2.0.478
+Local development
+-----------------
+
+`docker-compose.yml` runs the full stack locally (app + split celery + the Go
+services + PostGIS/Redis/Elasticsearch) for smoke testing the images:
+
+```sh
+docker compose up    # or: podman compose up
+```
+
+Kubernetes
+----------
+
+Deploy with the Helm chart at `morrismukiri/helm-chart-rapidpro` (celery worker
+pools with queue isolation, a singleton beat, a migrate hook Job, and hand-rolled
+dev/staging dependencies). Production points the deps at external URLs; dev/kind
+uses the bundled deps + MinIO (`values-local.yaml`).
+
+Running a single image directly
+-------------------------------
+
+> $ docker run --publish 8000:8000 morrismukiri/rapidpro:v9
 
 Environment variables
 ---------------------
@@ -79,12 +110,16 @@ Environment variables
   Defaults to `INFO`
 
 *AWS_STORAGE_BUCKET_NAME*
-  If set RapidPro will use S3 for static file storage. If not it will
-  default to using whitenoise.
+  If set, RapidPro stores uploaded **media and exports** on S3. Static assets
+  are baked into the image at build time and served by WhiteNoise regardless of
+  this setting.
 
-*AWS_BUCKET_DOMAIN*
-  The domain to use for serving statics from, defaults to
-  ``AWS_STORAGE_BUCKET_NAME`` + '.s3.amazonaws.com'
+*AWS_S3_REGION_NAME*
+  Region for the S3 bucket (used to build a region-correct endpoint).
+
+*AWS_S3_ENDPOINT_URL*
+  Optional S3 endpoint override (e.g. for MinIO). Defaults to the AWS endpoint
+  for ``AWS_S3_REGION_NAME``.
 
 *CDN_DOMAIN_NAME*
   Defaults to `''`
@@ -98,17 +133,23 @@ Environment variables
   This environment variable is available at run time but is only used for
   namespacing the django compressor manifest.
 
-*UWSGI_WSGI_FILE*
-  Defaults to `temba/wsgi.py`
+The app runs **gunicorn** (config at `/rapidpro/gunicorn.conf.py`), tuned via env:
 
-*UWSGI_MASTER*
-  Defaults to `1`
+*GUNICORN_WORKERS*
+  Worker processes. Defaults to `4`.
 
-*UWSGI_WORKERS*
-  Defaults to `8`
+*GUNICORN_THREADS*
+  Threads per worker. Defaults to `4`.
 
-*UWSGI_HARAKIRI*
-  Defaults to `20`
+*GUNICORN_TIMEOUT*
+  Worker timeout in seconds. Defaults to `30`.
+
+*GUNICORN_MAX_REQUESTS* / *GUNICORN_MAX_REQUESTS_JITTER*
+  Recycle a worker after this many requests (plus jitter) to bound memory.
+  Default `1000` / `100`.
+
+*PORT*
+  Port gunicorn binds to. Defaults to `8000`.
 
 *MAGE_AUTH_TOKEN*
   The Auth token for Mage

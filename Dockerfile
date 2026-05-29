@@ -1,87 +1,131 @@
-FROM ghcr.io/praekeltfoundation/python-base-nw:3.9-bullseye as builder
+# syntax=docker/dockerfile:1
+# RapidPro v9 application image (multi-arch). Single-version (v9-only) build.
+# Static assets are baked at build time; runtime serves them via WhiteNoise.
+
+# ---------------------------------------------------------------------------
+# Stage 1: builder (Python venv + Node assets, then bake collectstatic/compress)
+# ---------------------------------------------------------------------------
+FROM python:3.10-slim-bookworm AS builder
+
+ARG RAPIDPRO_REPO=rapidpro/rapidpro
+ARG RAPIDPRO_VERSION=v9.0.0
+ARG NODE_MAJOR=20
 
 ENV PIP_RETRIES=120 \
     PIP_TIMEOUT=400 \
     PIP_DEFAULT_TIMEOUT=400 \
-    C_FORCE_ROOT=1
+    C_FORCE_ROOT=1 \
+    VIRTUAL_ENV=/venv \
+    POETRY_NO_INTERACTION=1
 
-RUN apt-get-install.sh wget tar build-essential
+# Build + GeoDjango + asset toolchain deps. Node 20 from NodeSource.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg wget tar \
+        build-essential postgresql-client \
+        libmagic-dev libpcre3-dev libffi-dev libssl-dev \
+        libgeos-dev libgdal-dev libproj-dev gdal-bin; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends nodejs; \
+    npm install -g yarn; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /rapidpro
 
-ARG RAPIDPRO_VERSION
-ARG RAPIDPRO_REPO
-ENV RAPIDPRO_VERSION=${RAPIDPRO_VERSION:-master}
-ENV RAPIDPRO_REPO=${RAPIDPRO_REPO:-rapidpro/rapidpro}
-RUN echo "Downloading RapidPro ${RAPIDPRO_VERSION} from https://github.com/$RAPIDPRO_REPO/archive/${RAPIDPRO_VERSION}.tar.gz" && \
-    wget -O rapidpro.tar.gz "https://github.com/$RAPIDPRO_REPO/archive/${RAPIDPRO_VERSION}.tar.gz" && \
-    tar -xf rapidpro.tar.gz --strip-components=1 && \
+# Fetch RapidPro source for the pinned version.
+RUN set -eux; \
+    echo "Downloading RapidPro ${RAPIDPRO_VERSION} from https://github.com/${RAPIDPRO_REPO}"; \
+    wget -O rapidpro.tar.gz "https://github.com/${RAPIDPRO_REPO}/archive/${RAPIDPRO_VERSION}.tar.gz"; \
+    tar -xf rapidpro.tar.gz --strip-components=1; \
     rm rapidpro.tar.gz
 
-RUN pip install -U pip && pip install -U poetry
+# Python venv + dependencies (poetry installs into the active venv). gunicorn is
+# an upstream dep; whitenoise is added here (not shipped by v9) to serve static.
+ENV PATH="/venv/bin:/rapidpro/node_modules/.bin:$PATH"
+RUN set -eux; \
+    python3 -m venv /venv; \
+    pip install -U pip poetry; \
+    poetry install --no-interaction; \
+    pip install gunicorn whitenoise
 
-# Build Python virtualenv
-RUN python3 -m venv /venv
-ENV PATH="/venv/bin:$PATH"
-ENV VIRTUAL_ENV="/venv"
+# JS deps for the static bundles. django-compressor calls bare `lessc`; v9 needs
+# the latest LESS (handles CSS custom properties inside color functions), so
+# install it globally and drop the old pinned shim so the global one resolves.
+RUN yarn install --frozen-lockfile || yarn install
+RUN npm install -g less && rm -f /rapidpro/node_modules/.bin/lessc
 
-# Install configuration related dependencies
-RUN /venv/bin/pip install --upgrade pip && poetry install --no-interaction --no-dev && poetry add \
-        "django-getenv==1.3.2" \
-        "django-cache-url==3.2.3" \
-        "uwsgi==2.0.20" \
-        "whitenoise==5.3.0" \
-        "flower==1.0.0"
+# Our settings overlay must be present before baking static.
+COPY settings.py /rapidpro/temba/settings.py
 
-FROM ghcr.io/praekeltfoundation/python-base-nw:3.9-bullseye
-
+# Bake static: collectstatic + offline compression. Dummy env so settings load
+# without real services; no DB access occurs in these commands.
 ARG RAPIDPRO_VERSION
-ENV RAPIDPRO_VERSION=${RAPIDPRO_VERSION:-master}
+ENV RAPIDPRO_VERSION=${RAPIDPRO_VERSION} \
+    SECRET_KEY=build-time-dummy-key \
+    DATABASE_URL=postgresql://u:p@localhost/db \
+    REDIS_URL=redis://localhost:6379/0 \
+    DJANGO_COMPRESSOR=on \
+    AWS_STATIC=  \
+    AWS_MEDIA=
+# v9 templates are .html (not .haml) and use a dedicated compress settings module.
+RUN set -eux; \
+    python manage.py collectstatic --noinput --no-post-process; \
+    python manage.py compress --extension=".html" --settings=temba.settings_compress --force -v0
 
-# Copy rapidpro and venv from builder
-COPY --from=builder /rapidpro /rapidpro
-COPY --from=builder /venv /venv
-ENV PATH="/venv/bin:$PATH"
-ENV VIRTUAL_ENV="/venv"
+# ---------------------------------------------------------------------------
+# Stage 2: runtime (slim, non-root, no Node, baked static)
+# ---------------------------------------------------------------------------
+FROM python:3.10-slim-bookworm
 
-# Install `psql` for `manage.py dbshell`
-# `magic` is needed since rapidpro v3.0.64
-# `pcre` is needed for uwsgi
-# `geos`, `gdal`, and `proj` are needed for `manage.py download_geojson` and `manage.py import_geojson`
-# `npm` for static file generation
-RUN apt-get-install.sh \
-        postgresql-client \
-        libmagic-dev \
-        libpcre3 \
-        libgeos-c1v5 \
-        libgdal28 \
-        libproj19 \
-        npm
+ARG RAPIDPRO_REPO=rapidpro/rapidpro
+ARG RAPIDPRO_VERSION=v9.0.0
+
+# Runtime shared libs only (GeoDjango + libmagic + psql client for the migrate Job).
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        postgresql-client libmagic1 libpcre3 \
+        libgeos-c1v5 libgdal32 libproj25 \
+        ca-certificates tini; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd -g 1000 rapidpro; \
+    useradd -r -u 1000 -g rapidpro -d /rapidpro rapidpro
+
+COPY --from=builder --chown=rapidpro:rapidpro /venv /venv
+COPY --from=builder --chown=rapidpro:rapidpro /rapidpro /rapidpro
+
+# Runtime helpers / config overlays.
+COPY --chown=rapidpro:rapidpro stack/startup.sh /startup.sh
+COPY --chown=rapidpro:rapidpro stack/gunicorn.conf.py /rapidpro/gunicorn.conf.py
+COPY --chown=rapidpro:rapidpro stack/500.html /rapidpro/templates/500.html
+COPY --chown=rapidpro:rapidpro stack/init_db.sql /rapidpro/init_db.sql
+COPY --chown=rapidpro:rapidpro stack/clear-compressor-cache.py /rapidpro/clear-compressor-cache.py
+RUN chmod +x /startup.sh
+
+ENV PATH="/venv/bin:$PATH" \
+    VIRTUAL_ENV=/venv \
+    PYTHONUNBUFFERED=1 \
+    RAPIDPRO_VERSION=${RAPIDPRO_VERSION} \
+    STARTUP_CMD="gunicorn temba.wsgi:application -c /rapidpro/gunicorn.conf.py"
 
 WORKDIR /rapidpro
-
-RUN npm install -g less && npm install
-
-ENV UWSGI_VIRTUALENV=/venv UWSGI_WSGI_FILE=temba/wsgi.py UWSGI_HTTP=:8000 UWSGI_MASTER=1 UWSGI_WORKERS=8 UWSGI_HARAKIRI=20
-# Enable HTTP 1.1 Keep Alive options for uWSGI (http-auto-chunked needed when ConditionalGetMiddleware not installed)
-# These options don't appear to be configurable via environment variables, so pass them in here instead
-ENV STARTUP_CMD="/venv/bin/uwsgi --http-auto-chunked --http-keepalive"
-
-COPY settings.py /rapidpro/temba/
-# 500.html needed to keep the missing template from causing an exception during error handling
-COPY stack/500.html /rapidpro/templates/
-COPY stack/init_db.sql /rapidpro/
-COPY stack/clear-compressor-cache.py /rapidpro/
-
+USER rapidpro
 EXPOSE 8000
-COPY stack/startup.sh /
 
-LABEL org.label-schema.name="RapidPro" \
-      org.label-schema.description="RapidPro allows organizations to visually build scalable interactive messaging applications." \
-      org.label-schema.url="https://www.rapidpro.io/" \
-      org.label-schema.vcs-url="https://github.com/$RAPIDPRO_REPO" \
-      org.label-schema.vendor="Nyaruka, UNICEF, and individual contributors." \
-      org.label-schema.version=$RAPIDPRO_VERSION \
-      org.label-schema.schema-version="1.0"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/').status < 500 else 1)" || exit 1
 
+LABEL org.opencontainers.image.title="RapidPro" \
+      org.opencontainers.image.description="RapidPro visual messaging application platform (v9)." \
+      org.opencontainers.image.url="https://www.rapidpro.io/" \
+      org.opencontainers.image.source="https://github.com/morrismukiri/rapidpro-docker" \
+      org.opencontainers.image.version="${RAPIDPRO_VERSION}" \
+      org.opencontainers.image.vendor="Nyaruka, UNICEF, and individual contributors." \
+      io.rapidpro.app-source="https://github.com/${RAPIDPRO_REPO}"
+
+ENTRYPOINT ["tini", "--"]
 CMD ["/startup.sh"]
