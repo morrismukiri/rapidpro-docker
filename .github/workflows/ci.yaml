@@ -1,4 +1,4 @@
-name: Docker Image Tests
+name: build
 
 on:
   push:
@@ -6,87 +6,50 @@ on:
       - master
   pull_request:
 
+# Build the v9 images on every PR/push. The app build runs collectstatic +
+# compress, so a green build also proves settings.py loads. Go services build
+# from the parameterized Dockerfile per component. No registry push here;
+# publishing is done via the Makefile / docker-bake.hcl.
 jobs:
-  build:
+  app:
     runs-on: ubuntu-latest
-    env:
-      python_version: "3.9.x"
-      IMAGE: praekeltfoundation/rapidpro
-      REGISTRY_USER: rapidproautomation
-      REPO: rapidpro/rapidpro
-      GREP_TIMEOUT: 360
-    strategy:
-      matrix:
-        VERSION: [v7.2.4, v7.4.2]
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions/setup-python@v2
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build RapidPro app image (v9.0.0)
+        uses: docker/build-push-action@v6
         with:
-          python-version: ${{ env.python_version }}
-      - name: Install PostgreSQL and PostGIS
-        uses: nyaruka/postgis-action@v2.1.0
-        with:
-          postgresql version: 13
-          postgis version: 3.1
-          postgresql db: temba
-          postgresql user: temba
-          postgresql password: temba
-          postgresql arguments: "--jit=off"
-      - uses: docker/setup-buildx-action@v1
-      - name: Build Rapidpro Image
-        uses: docker/build-push-action@v2
-        with:
+          context: .
+          file: Dockerfile
           push: false
-          load: true
-          context: .
-          tags: ${{ env.IMAGE }}
+          tags: morrismukiri/rapidpro:ci
           build-args: |
-            RAPIDPRO_VERSION=${{matrix.VERSION}}
-            RAPIDPRO_REPO=${{env.REPO}}
-      - name: Test Rapidpro Image
-        run: |
-          docker run --name rapidpro --env-file docker.envfile --link postgis --publish 8000:8000 --detach "${{ env.IMAGE }}"
-          timeout ${{ env.GREP_TIMEOUT }} grep -m 1 'static files copied' <(docker logs --follow rapidpro 2>&1)
-          timeout ${{ env.GREP_TIMEOUT }} grep -m 1 'Running migrations' <(docker logs --follow rapidpro 2>&1)
-          timeout ${{ env.GREP_TIMEOUT }} grep -m 1 'spawned uWSGI http 1' <(docker logs --follow rapidpro 2>&1)
-          docker exec rapidpro /venv/bin/python /rapidpro/manage.py check
-      - name: Some debug outputs
-        if: always()
-        run: |
-          docker ps
-          docker images
-      - name: Rapidpro Container Logs
-        if: always()
-        run: |
-          docker logs rapidpro
-      - name: construct image metadata
-        uses: docker/metadata-action@v3
-        id: meta
+            RAPIDPRO_VERSION=v9.0.0
+            RAPIDPRO_REPO=rapidpro/rapidpro
+            NODE_MAJOR=20
+
+  go-services:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { binary: mailroom,    repo: nyaruka/mailroom,    version: "9.0.1", port: "8090" }
+          - { binary: courier,     repo: nyaruka/courier,     version: "9.0.1", port: "8080" }
+          - { binary: rp-indexer,  repo: nyaruka/rp-indexer,  version: "9.0.0", port: "8080" }
+          - { binary: rp-archiver, repo: nyaruka/rp-archiver, version: "9.0.0", port: "8080" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.binary }} (v${{ matrix.version }})
+        uses: docker/build-push-action@v6
         with:
-          images: |
-            praekeltfoundation/rapidpro
-            ghcr.io/praekeltfoundation/rapidpro-docker
-          tags: |
-            type=pep440,pattern=v{{major}},value=${{matrix.VERSION}}
-            type=pep440,pattern=v{{major}}.{{minor}},value=${{matrix.VERSION}}
-            type=pep440,pattern=v{{version}},value=${{matrix.VERSION}}
-      - name: login to ghcr
-        uses: docker/login-action@v1
-        with:
-          registry: ghcr.io
-          username: ${{github.actor}}
-          password: ${{secrets.GITHUB_TOKEN}}
-      - name: login to docker hub
-        uses: docker/login-action@v1
-        with:
-          username: ${{secrets.DOCKER_USERNAME}}
-          password: ${{secrets.DOCKER_PASSWORD}}
-      - name: build and push
-        uses: docker/build-push-action@v2
-        with:
-          push: ${{github.event_name != 'pull_request'}}
-          tags: ${{steps.meta.outputs.tags}}
-          context: .
+          context: go-services
+          file: go-services/Dockerfile
+          push: false
+          tags: morrismukiri/${{ matrix.binary }}:ci
           build-args: |
-            RAPIDPRO_VERSION=${{matrix.VERSION}}
-            RAPIDPRO_REPO=${{env.REPO}}
+            BINARY=${{ matrix.binary }}
+            REPO=${{ matrix.repo }}
+            VERSION=${{ matrix.version }}
+            PORT=${{ matrix.port }}
