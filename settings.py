@@ -123,7 +123,13 @@ if _es_url:
 # deployment's choice (3 days, matching the cleanup target) and keep it env-
 # overridable so the chart can change it without a rebuild.
 # ---------------------------------------------------------------------------
-RETENTION_PERIODS["channellog"] = timedelta(days=int(_env("CHANNELLOG_RETENTION_DAYS", "3")))  # noqa: F405
+try:
+    _channellog_retention_days = int(_env("CHANNELLOG_RETENTION_DAYS", "3"))
+    if _channellog_retention_days < 0:
+        raise ValueError("must be >= 0")
+except ValueError as e:
+    raise RuntimeError("CHANNELLOG_RETENTION_DAYS must be a non-negative integer") from e
+RETENTION_PERIODS["channellog"] = timedelta(days=_channellog_retention_days)  # noqa: F405
 
 # ---------------------------------------------------------------------------
 # GeoDjango libraries (arch-auto-discovery; works on amd64 and arm64/Graviton)
