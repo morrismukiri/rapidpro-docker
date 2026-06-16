@@ -7,6 +7,7 @@
 import ctypes.util
 import json
 import os
+from datetime import timedelta
 
 import dj_database_url
 
@@ -114,6 +115,15 @@ except (ValueError, TypeError):
 _es_url = _env("ELASTICSEARCH_URL") or _env("ELASTIC_ENDPOINT_URL")
 if _es_url:
     ELASTIC_ENDPOINT_URL = _es_url
+
+# ---------------------------------------------------------------------------
+# Retention. The daily "trim_channel_logs" beat task is correct upstream in v9
+# (the v8 onaio fork had a typo that silently disabled it, which let channellog
+# grow unbounded). v9 defaults channellog retention to 14 days; pin it to this
+# deployment's choice (3 days, matching the cleanup target) and keep it env-
+# overridable so the chart can change it without a rebuild.
+# ---------------------------------------------------------------------------
+RETENTION_PERIODS["channellog"] = timedelta(days=int(_env("CHANNELLOG_RETENTION_DAYS", "3")))  # noqa: F405
 
 # ---------------------------------------------------------------------------
 # GeoDjango libraries (arch-auto-discovery; works on amd64 and arm64/Graviton)
