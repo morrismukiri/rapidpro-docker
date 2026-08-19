@@ -219,6 +219,22 @@ if os.environ.get("BRAND_FEATURES"):
     BRAND["features"] = _list("BRAND_FEATURES", "", sep=",")
 
 # ---------------------------------------------------------------------------
+# Languages. RapidPro only offers languages that have an ISO-639-1 two-letter
+# equivalent, plus whatever NON_ISO6391_LANGUAGES allows. This deployment's
+# content is authored in "swh" (Coastal Swahili), which has no two-letter code,
+# so without this hook v9 cannot name, search, select or assign it and every
+# Swahili translation renders as an empty language tab. The legacy v8 release
+# sets NON_ISO6391_LANGUAGES=swh the same way.
+#
+# Union rather than replace: the upstream default carries "und", which
+# RapidPro's own campaign import writes when converting legacy "base"
+# translations, so dropping it would break those imports.
+# ---------------------------------------------------------------------------
+_extra_langs = _list("NON_ISO6391_LANGUAGES", "", sep=",")
+if _extra_langs:
+    NON_ISO6391_LANGUAGES = set(NON_ISO6391_LANGUAGES) | set(_extra_langs)  # noqa: F405
+
+# ---------------------------------------------------------------------------
 # Mailroom / email / send flags / API throttles
 # ---------------------------------------------------------------------------
 MAILROOM_URL = _env("MAILROOM_URL", "") or None
