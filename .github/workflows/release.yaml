@@ -1,0 +1,76 @@
+name: release
+
+# Publishes the RapidPro app image to Docker Hub.
+#
+# Only the app image is built from this repo's settings.py, so only it is
+# published here. The go services (mailroom, courier, rp-indexer, rp-archiver)
+# are unmodified upstream binaries and are published from docker-bake.hcl when
+# their upstream versions change.
+#
+# The image tag is deliberately decoupled from RAPIDPRO_VERSION: the build arg
+# pins which upstream RapidPro source is baked in, while the image tag
+# identifies this repo's build of it. So a settings.py change ships as a new
+# image tag against the same upstream version, e.g. v9.0.0-2.
+#
+# Trigger by pushing a git tag (the tag name becomes the image tag) or by
+# running the workflow manually and supplying one.
+#
+# Requires repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish, e.g. v9.0.0-2"
+        required: true
+        type: string
+      rapidpro_version:
+        description: "Upstream RapidPro source version to bake in"
+        required: false
+        default: "v9.0.0"
+        type: string
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve tags
+        id: meta
+        run: |
+          echo "image_tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+          echo "rapidpro_version=${{ inputs.rapidpro_version || 'v9.0.0' }}" >> "$GITHUB_OUTPUT"
+
+      # linux/amd64 only: the EKS node groups are amd64, and adding arm64 here
+      # means emulating the node/yarn and collectstatic stages under QEMU,
+      # which triples build time for no consumer. Add it back if an arm64 node
+      # group appears.
+      - name: Build and push RapidPro app image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: morrismukiri/rapidpro:${{ steps.meta.outputs.image_tag }}
+          build-args: |
+            RAPIDPRO_VERSION=${{ steps.meta.outputs.rapidpro_version }}
+            RAPIDPRO_REPO=rapidpro/rapidpro
+            NODE_MAJOR=20
+
+      - name: Summary
+        run: |
+          echo "Pushed \`morrismukiri/rapidpro:${{ steps.meta.outputs.image_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Upstream source: \`${{ steps.meta.outputs.rapidpro_version }}\` / platform: \`linux/amd64\`" >> "$GITHUB_STEP_SUMMARY"
