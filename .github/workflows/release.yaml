@@ -1,6 +1,7 @@
 name: release
 
-# Publishes the RapidPro app image to Docker Hub.
+# Publishes the RapidPro app image to Docker Hub as a multi-arch manifest
+# (linux/amd64 + linux/arm64).
 #
 # Only the app image is built from this repo's settings.py, so only it is
 # published here. The go services (mailroom, courier, rp-indexer, rp-archiver)
@@ -12,8 +13,21 @@ name: release
 # identifies this repo's build of it. So a settings.py change ships as a new
 # image tag against the same upstream version, e.g. v9.0.0-2.
 #
+# Each platform builds natively on its own GitHub-hosted runner (ubuntu-latest
+# is amd64, ubuntu-24.04-arm is arm64), pushed by digest only; a final job
+# stitches the digests into the tagged manifest list. No QEMU: emulating the
+# node/yarn and collectstatic stages roughly triples the build time. arm64 is
+# needed because the production EKS Karpenter NodePool provisions t4g
+# (Graviton) nodes for On-Demand capacity.
+#
 # Trigger by pushing a git tag (the tag name becomes the image tag) or by
-# running the workflow manually and supplying one.
+# running the workflow manually and supplying one. A manual run can also
+# reuse an already published amd64 image by digest instead of rebuilding it
+# (used for v9.0.0-3, which is v9.0.0-2's amd64 image plus a native arm64
+# build of the same source).
+#
+# A tag that already exists on Docker Hub is never overwritten: the publish
+# job checks first and skips, so re-pushing a git tag is safe.
 #
 # Requires repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN.
 
@@ -24,7 +38,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag to publish, e.g. v9.0.0-2"
+        description: "Image tag to publish, e.g. v9.0.0-3"
         required: true
         type: string
       rapidpro_version:
@@ -32,12 +46,124 @@ on:
         required: false
         default: "v9.0.0"
         type: string
+      amd64_digest:
+        description: "Optional: reuse this already published linux/amd64 manifest digest (sha256:...) instead of building amd64"
+        required: false
+        default: ""
+        type: string
+
+env:
+  IMAGE: morrismukiri/rapidpro
 
 jobs:
-  app:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      rapidpro_version: ${{ steps.meta.outputs.rapidpro_version }}
+      amd64_digest: ${{ steps.meta.outputs.amd64_digest }}
+      exists: ${{ steps.exists.outputs.exists }}
+    steps:
+      - name: Resolve tags
+        id: meta
+        run: |
+          echo "image_tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+          echo "rapidpro_version=${{ inputs.rapidpro_version || 'v9.0.0' }}" >> "$GITHUB_OUTPUT"
+          echo "amd64_digest=${{ inputs.amd64_digest || '' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Refuse to overwrite a published tag
+        id: exists
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.image_tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::$IMAGE:${{ steps.meta.outputs.image_tag }} is already on Docker Hub; nothing will be built or pushed."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.exists == 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Skip the amd64 build when a digest to reuse was supplied.
+    steps:
+      - name: Decide whether this platform builds
+        id: gate
+        run: |
+          if [ "${{ matrix.platform }}" = "linux/amd64" ] && [ -n "${{ needs.resolve.outputs.amd64_digest }}" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Reusing amd64 digest ${{ needs.resolve.outputs.amd64_digest }}"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.build == 'true'
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.gate.outputs.build == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.gate.outputs.build == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest (${{ matrix.platform }})
+        if: steps.gate.outputs.build == 'true'
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            RAPIDPRO_VERSION=${{ needs.resolve.outputs.rapidpro_version }}
+            RAPIDPRO_REPO=rapidpro/rapidpro
+            NODE_MAJOR=20
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          if [ "${{ steps.gate.outputs.build }}" = "true" ]; then
+            digest="${{ steps.build.outputs.digest }}"
+          else
+            digest="${{ needs.resolve.outputs.amd64_digest }}"
+          fi
+          echo "${{ matrix.platform }} $digest"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.exists == 'false'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
 
@@ -46,31 +172,23 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Resolve tags
-        id: meta
+      - name: Create the multi-arch manifest
+        working-directory: /tmp/digests
         run: |
-          echo "image_tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
-          echo "rapidpro_version=${{ inputs.rapidpro_version || 'v9.0.0' }}" >> "$GITHUB_OUTPUT"
+          ls -1
+          docker buildx imagetools create -t "$IMAGE:${{ needs.resolve.outputs.image_tag }}" \
+            $(printf "$IMAGE@sha256:%s " *)
 
-      # linux/amd64 only: the EKS node groups are amd64, and adding arm64 here
-      # means emulating the node/yarn and collectstatic stages under QEMU,
-      # which triples build time for no consumer. Add it back if an arm64 node
-      # group appears.
-      - name: Build and push RapidPro app image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          platforms: linux/amd64
-          tags: morrismukiri/rapidpro:${{ steps.meta.outputs.image_tag }}
-          build-args: |
-            RAPIDPRO_VERSION=${{ steps.meta.outputs.rapidpro_version }}
-            RAPIDPRO_REPO=rapidpro/rapidpro
-            NODE_MAJOR=20
-
-      - name: Summary
+      - name: Inspect and summarise
         run: |
-          echo "Pushed \`morrismukiri/rapidpro:${{ steps.meta.outputs.image_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Upstream source: \`${{ steps.meta.outputs.rapidpro_version }}\` / platform: \`linux/amd64\`" >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools inspect "$IMAGE:${{ needs.resolve.outputs.image_tag }}" | tee /tmp/inspect.txt
+          {
+            echo "Pushed \`$IMAGE:${{ needs.resolve.outputs.image_tag }}\`"
+            echo ""
+            echo "Upstream source: \`${{ needs.resolve.outputs.rapidpro_version }}\`, built from \`${{ github.sha }}\`"
+            [ -n "${{ needs.resolve.outputs.amd64_digest }}" ] && echo "amd64 reused: \`${{ needs.resolve.outputs.amd64_digest }}\`"
+            echo ""
+            echo '```'
+            cat /tmp/inspect.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
