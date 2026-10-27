@@ -121,15 +121,19 @@ if _es_url:
 # (the v8 onaio fork had a typo that silently disabled it, which let channellog
 # grow unbounded). v9 defaults channellog retention to 14 days; pin it to this
 # deployment's choice (3 days, matching the cleanup target) and keep it env-
-# overridable so the chart can change it without a rebuild.
+# overridable so the chart can change it without a rebuild. Validate strictly:
+# a non-integer crashes with an opaque error, and a value < 1 sets the trim
+# cutoff to now-or-future, which would delete EVERY channel log.
 # ---------------------------------------------------------------------------
 try:
-    _channellog_retention_days = int(_env("CHANNELLOG_RETENTION_DAYS", "3"))
-    if _channellog_retention_days < 0:
-        raise ValueError("must be >= 0")
-except ValueError as e:
-    raise RuntimeError("CHANNELLOG_RETENTION_DAYS must be a non-negative integer") from e
-RETENTION_PERIODS["channellog"] = timedelta(days=_channellog_retention_days)  # noqa: F405
+    _channellog_days = int(_env("CHANNELLOG_RETENTION_DAYS", "3"))
+except (TypeError, ValueError):
+    raise RuntimeError("CHANNELLOG_RETENTION_DAYS must be a positive integer number of days")
+if _channellog_days < 1:
+    raise RuntimeError(
+        "CHANNELLOG_RETENTION_DAYS must be >= 1; a value < 1 would delete all channel logs"
+    )
+RETENTION_PERIODS["channellog"] = timedelta(days=_channellog_days)  # noqa: F405
 
 # ---------------------------------------------------------------------------
 # GeoDjango libraries (arch-auto-discovery; works on amd64 and arm64/Graviton)
@@ -213,6 +217,22 @@ if isinstance(BRAND.get("logos"), dict):  # noqa: F405
     BRAND["logos"]["favico"] = _env("BRAND_FAVICO", BRAND["logos"].get("favico"))  # noqa: F405
 if os.environ.get("BRAND_FEATURES"):
     BRAND["features"] = _list("BRAND_FEATURES", "", sep=",")
+
+# ---------------------------------------------------------------------------
+# Languages. RapidPro only offers languages that have an ISO-639-1 two-letter
+# equivalent, plus whatever NON_ISO6391_LANGUAGES allows. This deployment's
+# content is authored in "swh" (Coastal Swahili), which has no two-letter code,
+# so without this hook v9 cannot name, search, select or assign it and every
+# Swahili translation renders as an empty language tab. The legacy v8 release
+# sets NON_ISO6391_LANGUAGES=swh the same way.
+#
+# Union rather than replace: the upstream default carries "und", which
+# RapidPro's own campaign import writes when converting legacy "base"
+# translations, so dropping it would break those imports.
+# ---------------------------------------------------------------------------
+_extra_langs = _list("NON_ISO6391_LANGUAGES", "", sep=",")
+if _extra_langs:
+    NON_ISO6391_LANGUAGES = set(NON_ISO6391_LANGUAGES) | set(_extra_langs)  # noqa: F405
 
 # ---------------------------------------------------------------------------
 # Mailroom / email / send flags / API throttles
